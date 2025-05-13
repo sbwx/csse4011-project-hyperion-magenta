@@ -1,2 +1,2 @@
-# csse4011-project-hyperion-magenta
+# CSSE4011 Project Hyperion-Magenta
 Autonomous environmental data logging RC car with data streaming capabilities to a web dashboard and real-time heatmapping on a remote visualiser.
