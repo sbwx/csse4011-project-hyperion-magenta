@@ -1,0 +1,8 @@
+/ {
+    ultrasonic: ultrasonic {
+        status = "okay";
+        compatible = "hc-sr04";
+        trigger-gpios = <&gpio1 10 GPIO_ACTIVE_HIGH>;
+        echo-gpios = <&gpio1 11 GPIO_ACTIVE_HIGH>;
+    };
+};

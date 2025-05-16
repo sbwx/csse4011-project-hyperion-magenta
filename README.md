@@ -1,2 +1,2 @@
 # CSSE4011 Project Hyperion-Magenta
-Autonomous environmental data logging RC car with data streaming capabilities to a web dashboard and real-time heatmapping on a remote visualiser.
+Project Hyperion-Magenta is a demonstration of sensor fusion and localisation through a fun and interactive gameplay experience utilising BLE RSSI ranging, sensor fusing with an accelerometer and ultrasonic sensors to ensure a high level of accuracy in localising a player within a 3m x 4m grid.
