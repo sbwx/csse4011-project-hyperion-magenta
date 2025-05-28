@@ -1,76 +1,224 @@
-/* main.c - Application main entry point */
-
-/*
-* Copyright (c) 2015-2016 Intel Corporation
-*
-* SPDX-License-Identifier: Apache-2.0
-*/
-
-#include <zephyr/types.h>
-#include <stddef.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <errno.h>
 #include <zephyr/kernel.h>
-#include <zephyr/sys/printk.h>
-
-#include <zephyr/shell/shell.h>
-#include <zephyr/drivers/uart.h>
-
-#include <zephyr/drivers/gpio.h>
-
+#include <zephyr/device.h>
+#include <zephyr/drivers/display.h>
+#include <lvgl.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/sys/byteorder.h>
-#include <math.h>
-#include <string.h>
-#include <zephyr/drivers/display.h>
-#include <lvgl.h>
 
-struct ibeacon_node {
-    struct rbnode rb_n;
-    char name[32];
-	char mac[18];
-	uint16_t major;
-	uint16_t minor;
-	float x;
-	float y;
-	char left[32];
-	char right[32];
-};
+#define STACK_SIZE 4096
+#define SCREEN_THREAD_PRIORITY 8
+#define BT_THREAD_PRIORITY 9
 
-// function prototype for scanning
-static void start_scan(void);
+void screen_thread();
+void bt_thread();
 
-// uart shell device pointer
-const struct device* dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_shell_uart));
+K_THREAD_DEFINE(screen_tid, STACK_SIZE, screen_thread, NULL, NULL, NULL, SCREEN_THREAD_PRIORITY, 0, 0);
+K_THREAD_DEFINE(bt_tid, STACK_SIZE, bt_thread, NULL, NULL, NULL, BT_THREAD_PRIORITY, 0, 0);
 
-// macro for converting uint32 to float while preserving bit order
-#define UINT32_TO_FLOAT(i, f) {	\
-    uint32_t tempInt = i;	\	
-    f = *(float*)&tempInt;	\
+K_MSGQ_DEFINE(lifeQ, sizeof(uint8_t), 1, 1);
+K_MSGQ_DEFINE(comboQ, sizeof(uint8_t), 1, 1);
+K_MSGQ_DEFINE(scoreQ, sizeof(uint8_t), 1, 1);
+
+LV_IMG_DECLARE(matthew);
+
+void display_matthew() {
+	lv_obj_t *img = lv_img_create(lv_scr_act());  // create image object
+	lv_img_set_src(img, &matthew);               // set the image source
+	lv_obj_align(img, LV_ALIGN_CENTER, 0, 0);
 }
 
- // helper function for joining 8 uint8s into one uint32
-uint32_t join_u32(uint8_t* fArray) {
-	return (((uint32_t)fArray[0] << 24) |
-			((uint32_t)fArray[1] << 16) |
-			((uint32_t)fArray[2] << 8) 	|
-			((uint32_t)fArray[3]) );
+// function to display game over text
+void game_over(uint32_t color) {
+	// get active screen object
+    lv_obj_t *screen = lv_scr_act();
+
+    //lv_obj_clean(screen);
+
+    // create text label
+    lv_obj_t *label = lv_label_create(screen);
+    lv_label_set_text(label, "GAME OVER");
+
+    // set font
+    lv_obj_set_style_text_font(label, &lv_font_unscii_16, LV_PART_MAIN);
+
+    // set text color
+    lv_obj_set_style_text_color(label, lv_color_hex(color), LV_PART_MAIN);
+
+    // center label
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+
+    // update screen
+    lv_task_handler();
 }
 
-// return 0 if not mobile mac address
-uint8_t check_mobile(const bt_addr_le_t *addr) {
+// function to display game over text
+void update_lives(uint8_t lives) {
+	// get active screen object
+    lv_obj_t *screen = lv_scr_act();
+
+    // create text label
+    lv_obj_t *lifeLabel = lv_label_create(screen);
+
+	// create string with '|'s corresponding to num lives
+	char lifeStr[3] = "";
+	for (int i = 0; i < lives; i++) {
+		strcat(lifeStr, "|");
+	}
+
+	// set text
+    lv_label_set_text(lifeLabel, lifeStr);
+
+    // set font
+    lv_obj_set_style_text_font(lifeLabel, &lv_font_unscii_16, LV_PART_MAIN);
+
+    // set text color
+    lv_obj_set_style_text_color(lifeLabel, lv_color_hex(0xff5555), LV_PART_MAIN);
+
+    // center label
+    lv_obj_align(lifeLabel, LV_ALIGN_TOP_LEFT, 8, 10);
+}
+
+// function to display combo meter
+void update_combo(uint32_t combo) {
+	// get active screen object
+    lv_obj_t *screen = lv_scr_act();
+
+    // create text label
+    lv_obj_t *comboLabel = lv_label_create(screen);
+
+	char comboStr[10] = "";
+	sprintf(comboStr, "x%d", combo);
+
+	// set text
+    lv_label_set_text(comboLabel, comboStr);
+
+    // set font
+    lv_obj_set_style_text_font(comboLabel, &lv_font_unscii_16, LV_PART_MAIN);
+
+    // set text color
+    lv_obj_set_style_text_color(comboLabel, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+
+    // center label
+    lv_obj_align(comboLabel, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+}
+
+// function to display combo meter
+void update_score(uint32_t score) {
+	// get active screen object
+    lv_obj_t *screen = lv_scr_act();
+
+    // create text label
+    lv_obj_t *scoreLabel = lv_label_create(screen);
+
+	char scoreStr[10] = "";
+	sprintf(scoreStr, "%d", score);
+
+	// set text
+    lv_label_set_text(scoreLabel, scoreStr);
+
+    // set font
+    lv_obj_set_style_text_font(scoreLabel, &lv_font_unscii_16, LV_PART_MAIN);
+
+    // set text color
+    lv_obj_set_style_text_color(scoreLabel, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+
+    // center label
+    lv_obj_align(scoreLabel, LV_ALIGN_CENTER, 0, 0);
+}
+
+// wrapper function to update all stats, clearing screen
+void update_stats(uint8_t lives, uint32_t score, uint32_t combo) {
+    lv_obj_t *screen = lv_scr_act();
+    lv_obj_clean(screen);
+
+	update_lives(lives);
+	update_score(score);
+	update_combo(combo);
+	
+    // update screen
+    lv_task_handler();
+}
+
+void screen_thread() {
+	// get screen device
+	const struct device *display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+	// check device ready
+    if (!device_is_ready(display_dev)) {
+        printk("Display not ready\n");
+        return;
+    }
+    lv_obj_t *screen = lv_scr_act();
+
+	// init screen
+    display_blanking_off(display_dev);
+    lv_obj_clean(screen);
+	lv_obj_set_style_bg_color(screen, lv_color_hex(0x003a57), LV_PART_MAIN);
+
+	uint8_t lives = 0;
+	uint32_t score = 0;
+	uint8_t combo = 0;
+
+	uint32_t toggle = 0x00000000;
+
+	k_msgq_get(&lifeQ, &lives, K_NO_WAIT);
+	k_msgq_get(&scoreQ, &score, K_NO_WAIT);
+	k_msgq_get(&comboQ, &combo, K_NO_WAIT);
+
+	while (1) {
+		if (lives > 0) {
+			k_msgq_get(&lifeQ, &lives, K_NO_WAIT);
+			k_msgq_get(&scoreQ, &score, K_NO_WAIT);
+			k_msgq_get(&comboQ, &combo, K_NO_WAIT);
+			update_stats(lives, (score * 100), combo);
+			k_msleep(1);
+		} else {
+			k_msgq_get(&lifeQ, &lives, K_NO_WAIT);
+			if (lives > 0) {
+				continue;
+			}
+			lv_obj_clean(screen);
+			display_matthew();
+			game_over(toggle);
+			toggle = 0x00FFFFFF - toggle;
+			k_msleep(1000);
+		}
+	}
+	return;
+}
+
+ // ad parsing function for ultrasonic adv
+ static bool parse_base_cb(struct bt_data *data, void *user_data) {
+	uint8_t lives;
+	uint8_t combo;
+	uint8_t score;
+	if (data->type == BT_DATA_MANUFACTURER_DATA && data->data_len >= 25) {
+		const uint8_t *d = data->data;
+		lives = d[20];
+		combo = d[21];
+		score = d[22];
+
+		k_msgq_put(&lifeQ, &lives, K_NO_WAIT);
+
+		k_msgq_put(&comboQ, &combo, K_NO_WAIT);
+
+		k_msgq_put(&scoreQ, &score, K_NO_WAIT);
+	}
+	return true;
+}
+
+ // return 0 if not mobile mac address
+ uint8_t check_base(const bt_addr_le_t *addr) {
 	// mac address for mobile node (THINGY52)
-	uint8_t mobileAddr[6] = {0xFE, 0xC0, 0x04, 0xFD, 0x5D, 0xC5};
+	uint8_t baseAddr[6] = {0x97, 0x6D, 0xE6, 0x30, 0x15, 0xD3};
 	for (uint8_t i = 0; i < 6; i++) {
-		if (addr->a.val[i] == mobileAddr[i]) {
+		if (addr->a.val[i] == baseAddr[i]) {
 			if (i == 5) {
 				// thats the one
-				//printk("Matching iBeacon found\r\n");
 				return 1;
 			}
 		} else {
@@ -79,104 +227,43 @@ uint8_t check_mobile(const bt_addr_le_t *addr) {
 	}
 	return 0;
  }
- 
-// callback function for when device found
-static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, struct net_buf_simple *ad) { 
-	 // only check indirect scannable ads
-	 if (type != BT_GAP_ADV_TYPE_ADV_SCAN_IND) {
-		// check scannable not connectable
-		 return;
-	 }
-	 // check if mac matches mobile
-	 if (check_mobile(addr)) {
-		//printk("MOBILE FOUND\r\n");
-		bt_data_parse(ad, parse_mobile_cb, NULL);
-		return;
-	 }
-	 // check if mac matches ultrasonic
-	 if (check_ultrasonic(addr)) {
-		//printk("ULTRASONIC FOUND\r\n");
-		bt_data_parse(ad, parse_us_cb, NULL);
-		return;
-	 }
 
-	 //printk("ADDR: %x:%x:%x:%x:%x:%x\r\n", addr->a.val[0], addr->a.val[1], addr->a.val[2], addr->a.val[3], addr->a.val[4], addr->a.val[5]);
- 
-}
- 
- // function that sets up bt scanning
+static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
+	struct net_buf_simple *ad) {
+	if (type != BT_GAP_ADV_TYPE_ADV_SCAN_IND) {
+		return;
+	} 
+
+	if (check_base(addr)) {
+		bt_data_parse(ad, parse_base_cb, NULL);
+	}
+ }
+
 static void start_scan(void) {
-	 int err;
- 
-	 err = bt_le_scan_start(BT_LE_SCAN_PASSIVE_CONTINUOUS, device_found);
-	 if (err) {
-		 printk("Scanning failed to start (err %d)\n", err);
-		 return;
-	 }
- 
-	 printk("Scanning successfully started\n");
- }
-
- // helper function that rounds float to nearest 0.5
- float round_to_half(float x) {
-	return round(x * 2.0) / 2.0;
-}
-
-lv_obj_t* draw_circle_outline() 
-{
-
-    static lv_obj_t* circle;
-    circle = lv_obj_create(lv_scr_act());
-    lv_obj_set_scrollbar_mode(circle, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_set_size(circle, 8, 8);
-    lv_obj_set_pos(circle, 64-6, 32-6);
-    lv_obj_set_style_bg_color(circle, (lv_color_t)LV_COLOR_MAKE(255, 255, 255), 0);
-    lv_obj_set_style_radius(circle, LV_RADIUS_CIRCLE, 0);
-
-    // Set border color and width
-    lv_obj_set_style_border_color(circle, (lv_color_t)LV_COLOR_MAKE(0,0,0), LV_PART_MAIN);
-    lv_obj_set_style_border_width(circle, 1, LV_PART_MAIN);
-    
-    return circle;
-
- }
-
-/* Draw Rectangle
-* 
-* Draws a rectangle at a given (x,y)
-*
-*/
-lv_obj_t* draw_rect(int x, int y)
-{
-    static lv_obj_t* node;
-    node = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(node, 8, 8);
-    lv_obj_set_pos(node, x, y);
-    lv_obj_set_style_bg_color(node, (lv_color_t)LV_COLOR_MAKE(0,0,0), 0);
-	return node;
-}
-
-int main(void) {
-
 	int err;
- 
-	 // attempt to enable bt
-	 err = bt_enable(NULL);
-	 if (err) {
-		 printk("Bluetooth init failed (err %d)\n", err);
-		 return 0;
-	 }
-	 printk("Bluetooth initialized\n");
- 
-	 // start scanning
-	 start_scan();
 
-     static lv_obj_t* node1;
-     node1 = draw_rect(160 - 8, 120 - 8);
-   
-     while (1) {
-        lv_timer_handler();
-		k_msleep(500);
-	 }
-	 return 0;
+	/* This demo doesn't require active scan */
+	err = bt_le_scan_start(BT_LE_SCAN_PASSIVE, device_found);
+	if (err) {
+		printk("Scanning failed to start (err %d)\n", err);
+		return;
+	}
+
+	printk("Scanning successfully started\n");
+}
+
+void bt_thread(void) {
+	int err;
+
+	err = bt_enable(NULL);
+	if (err) {
+		printk("Bluetooth init failed (err %d)\n", err);	
+		return 0;
+	}
+
+	printk("Bluetooth initialized\n");
+
+	start_scan();
+	
+	return;
 }
