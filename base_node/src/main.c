@@ -179,9 +179,19 @@ K_MSGQ_DEFINE(lifeQ, sizeof(uint8_t), 1, 1);
 K_MSGQ_DEFINE(scoreQ, sizeof(uint8_t), 1, 1);
 K_MSGQ_DEFINE(comboQ, sizeof(uint8_t), 1, 1);
 
+K_MSGQ_DEFINE(speedQ, sizeof(uint8_t), 1, 1);
+
+uint8_t globSpeed = 400;
+
 K_SEM_DEFINE(gameStart, 0, 1);
-const struct gpio_dt_spec button1 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+const struct gpio_dt_spec button0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+static struct gpio_callback button0_cb_data;
+
+const struct gpio_dt_spec button1 = GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios);
 static struct gpio_callback button1_cb_data;
+
+const struct gpio_dt_spec button2 = GPIO_DT_SPEC_GET(DT_ALIAS(sw3), gpios);
+static struct gpio_callback button2_cb_data;
 
 #define STACK_SIZE 4096
 #define SCREEN_THREAD_PRIORITY 8
@@ -192,13 +202,10 @@ static struct gpio_callback button1_cb_data;
 void screen_thread();
 void bt_thread();
 void speaker_thread();
-void tx_thread();
 
 K_THREAD_DEFINE(screen_tid, STACK_SIZE, screen_thread, NULL, NULL, NULL, SCREEN_THREAD_PRIORITY, 0, 0);
 K_THREAD_DEFINE(bt_tid, STACK_SIZE, bt_thread, NULL, NULL, NULL, BT_THREAD_PRIORITY, 0, 0);
 K_THREAD_DEFINE(speaker_tid, STACK_SIZE, speaker_thread, NULL, NULL, NULL, SPEAKER_THREAD_PRIORITY, 0, 0);
-//K_THREAD_DEFINE(tx_tid, STACK_SIZE, tx_thread, NULL, NULL, NULL, TX_THREAD_PRIORITY, 0, 0);
-
 
  // macro for converting uint32 to float while preserving bit order
  #define UINT32_TO_FLOAT(i, f) {	\
@@ -288,8 +295,16 @@ void clear_rgb_matrix()
     memset(&(pixels[0]), 0x00, sizeof(struct led_rgb) * 255);
 }
 
+void button0_pressed(const struct device *dev, struct gpio_callback *cb) 
+{
+    globSpeed = 300;
+    k_msleep(1);
+    k_sem_give(&gameStart);
+}
 void button1_pressed(const struct device *dev, struct gpio_callback *cb) 
 {
+    globSpeed = 500;
+    k_msleep(1);
     k_sem_give(&gameStart);
 }
 
@@ -299,11 +314,7 @@ void screen_thread(void) {
     uint8_t score = 0;
     uint8_t lives = 0;
     uint8_t combo = 0;
-
-    gpio_pin_configure_dt(&button1, GPIO_INPUT);
-	gpio_pin_interrupt_configure_dt(&button1, GPIO_INT_EDGE_TO_ACTIVE);
-	gpio_init_callback(&button1_cb_data, button1_pressed, BIT(button1.pin));
-	gpio_add_callback(button1.port, &button1_cb_data);
+    uint8_t speed = 400;
 
     // The colour to draw the strip as
     struct led_rgb* colour = &colors[3];
@@ -311,6 +322,11 @@ void screen_thread(void) {
 	if (!device_is_ready(strip)) {
 		return;
 	}
+        
+    gpio_pin_configure_dt(&button0, GPIO_INPUT);
+	gpio_pin_interrupt_configure_dt(&button0, GPIO_INT_EDGE_TO_ACTIVE);
+	gpio_init_callback(&button0_cb_data, button0_pressed, BIT(button0.pin));
+	gpio_add_callback(button0.port, &button0_cb_data);
 
     while (1) {
 
@@ -321,6 +337,8 @@ void screen_thread(void) {
 
             // Attempt to take the sem for game start
             k_sem_take(&gameStart, K_FOREVER);
+            //k_msgq_get(&speedQ, &speed, K_NO_WAIT);
+            speed = globSpeed;
             
             // Init all values
             lives = 3;
@@ -433,7 +451,7 @@ void screen_thread(void) {
                 (currBlock->y) -= 1;
             }
         }
-        k_msleep(400);
+        k_msleep(speed);
     }
 	return;
 }
@@ -663,6 +681,11 @@ float estimate(float measurement, KalmanFilter* kalman) {
 }
 
 void bt_thread() {
+    gpio_pin_configure_dt(&button1, GPIO_INPUT);
+	gpio_pin_interrupt_configure_dt(&button1, GPIO_INT_EDGE_TO_ACTIVE);
+	gpio_init_callback(&button1_cb_data, button1_pressed, BIT(button1.pin));
+	gpio_add_callback(button1.port, &button1_cb_data);
+
     float leftVal = 0;
     float rightVal = 0;
     uint8_t tempPos = 0;
@@ -889,7 +912,7 @@ void bt_thread() {
         sprintf(fuck.value, "%.3f", leftVal);
 
         // Create the variable string for the JSON
-        snprintf(fuck.variable, 10, "us-left");
+        snprintf(fuck.variable, 10, "usLeft");
         
         // Set the units
         strcpy(fuck.unit, "m");
@@ -908,7 +931,7 @@ void bt_thread() {
         sprintf(fuck.value, "%.3f", rightVal);
 
         // Create the variable string for the JSON
-        snprintf(fuck.variable, 10, "us-right");
+        snprintf(fuck.variable, 10, "usRight");
         
         // Set the units
         strcpy(fuck.unit, "m");
@@ -1024,34 +1047,4 @@ void speaker_thread(void) {
         k_msleep(10);
     }
     return;
-}
-
-void tx_thread() {
-    uint8_t state = 0;
-    uint8_t lives = 0;
-    uint8_t score = 0;
-    uint8_t combo = 0;
-
-    int err;
-
-    /* Initialize the Bluetooth Subsystem */
-    bt_id_create(&address, NULL);
-    err = bt_enable(bt_ready);
-
-	if (err) {
-		printk("Bluetooth init failed (err %d)\n", err);	
-		return;
-	}
-
-	printk("Bluetooth initialized\n");
-
-	start_scan();
-
-    while (1) {
-        k_msgq_peek(&lifeQ, &lives);
-        k_msgq_peek(&scoreQ, &score);
-        k_msgq_peek(&comboQ, &combo);
-        update_ad(lives, combo, score, 0);
-        k_msleep(10);
-    }
 }
