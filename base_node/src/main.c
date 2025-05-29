@@ -1019,10 +1019,10 @@ void speaker_thread(void) {
         return;
     }
 
-    //while (1) {
+    while (1) {
         play_melody(imperial_march, ARRAY_SIZE(imperial_march), 500);
         k_msleep(10);
-    //}
+    }
     return;
 }
 
