@@ -25,10 +25,11 @@ K_MSGQ_DEFINE(comboQ, sizeof(uint8_t), 1, 1);
 K_MSGQ_DEFINE(scoreQ, sizeof(uint8_t), 1, 1);
 
 LV_IMG_DECLARE(matthew);
+LV_IMG_DECLARE(presidentsnow);
 
 void display_matthew() {
 	lv_obj_t *img = lv_img_create(lv_scr_act());  // create image object
-	lv_img_set_src(img, &matthew);               // set the image source
+	lv_img_set_src(img, &presidentsnow);               // set the image source
 	lv_obj_align(img, LV_ALIGN_CENTER, 0, 0);
 }
 
@@ -185,7 +186,7 @@ void screen_thread() {
 			display_matthew();
 			game_over(toggle);
 			toggle = 0x00FFFFFF - toggle;
-			k_msleep(1000);
+			k_msleep(50);
 		}
 	}
 	return;
@@ -199,8 +200,12 @@ void screen_thread() {
 	if (data->type == BT_DATA_MANUFACTURER_DATA && data->data_len >= 25) {
 		const uint8_t *d = data->data;
 		lives = d[20];
+		printk("Lives:	%d\r\n", lives);
 		combo = d[21];
+		printk("Combo:	%d\r\n", combo);
 		score = d[22];
+		printk("Score:	%d\r\n", score);
+
 
 		k_msgq_put(&lifeQ, &lives, K_NO_WAIT);
 
@@ -219,6 +224,7 @@ void screen_thread() {
 		if (addr->a.val[i] == baseAddr[i]) {
 			if (i == 5) {
 				// thats the one
+				printk("matching found\r\n");
 				return 1;
 			}
 		} else {

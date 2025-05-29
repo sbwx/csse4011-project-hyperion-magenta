@@ -197,6 +197,8 @@ void tx_thread();
 K_THREAD_DEFINE(screen_tid, STACK_SIZE, screen_thread, NULL, NULL, NULL, SCREEN_THREAD_PRIORITY, 0, 0);
 K_THREAD_DEFINE(bt_tid, STACK_SIZE, bt_thread, NULL, NULL, NULL, BT_THREAD_PRIORITY, 0, 0);
 K_THREAD_DEFINE(speaker_tid, STACK_SIZE, speaker_thread, NULL, NULL, NULL, SPEAKER_THREAD_PRIORITY, 0, 0);
+//K_THREAD_DEFINE(tx_tid, STACK_SIZE, tx_thread, NULL, NULL, NULL, TX_THREAD_PRIORITY, 0, 0);
+
 
  // macro for converting uint32 to float while preserving bit order
  #define UINT32_TO_FLOAT(i, f) {	\
@@ -684,7 +686,7 @@ void bt_thread() {
     uint8_t score = 0;
     uint8_t combo = 0;
 
-	struct tagioObj fuck;
+    struct tagioObj fuck;
 
     KalmanFilter rssiKalman = { 
 		.kalmanGain = 0.f,
@@ -753,10 +755,26 @@ void bt_thread() {
     
         start_scan();
 
+    // teehee
+/* 	int8_t* rssiArr = (int8_t*)k_calloc(DIST_MAX_ENTRIES, sizeof(int8_t));
+    k_msgq_put(&rssiQ, &rssiArr, K_NO_WAIT);
+    
+    float** cunt = (float**)k_calloc(20, sizeof(float*));
+    float fuck[13][2] = BASE_COORDS;
+
+    for (uint8_t i = 0; i < 20; i++)
+        cunt[i] = (float*)k_calloc(2, sizeof(float));
+
+    for (uint8_t i = 0; i < 13; i++) {
+        for (uint8_t j = 0; j < 2; j++) {
+            cunt[i][j] = fuck[i][j];
+        }
+    } */
+
     while (1) {
         for (int i = 0; i < 8; i++) {
             distArr[i] = rssi_to_dist(i, stupidArr[i]);
-            printk("Dist %d:    %f\r\n", i, distArr[i]);
+            //printk("Dist %d:    %f\r\n", i, distArr[i]);
         }
 
         distLWindow[avIndex] = distArr[1];
@@ -777,15 +795,15 @@ void bt_thread() {
         rightDist = estimate(rightDist, &distRKalman);
         uint8_t rssiPos;
 
-        printk("Left Dist:  %f\r\n", leftDist);
-        printk("Right Dist:  %f\r\n", rightDist);
+        //printk("Left Dist:  %f\r\n", leftDist);
+        //printk("Right Dist:  %f\r\n", rightDist);
 
         if (pick_closest(leftDist, rightDist)) {
             rssiPos = (leftDist > 0.45);
         } else {
             rssiPos = 3 - (rightDist > 0.45);
         }
-        printk("RSSI Pos:   %d\r\n", rssiPos);
+        //printk("RSSI Pos:   %d\r\n", rssiPos);
 
          // Pick the closest distance value (left node if 1)
 /*         if (pick_closest(distArr[1], distArr[5] + 0.2)) {
@@ -814,7 +832,7 @@ void bt_thread() {
 
         multiY = estimate(multiY, &rssiKalman);
 
-            fuck.variable = (char*)k_malloc(sizeof(char) * 10);
+        fuck.variable = (char*)k_malloc(sizeof(char) * 10);
 			fuck.value = (char*)k_malloc(sizeof(char) * 15);
 			fuck.unit = (char*)k_malloc(sizeof(char) * 4);
 
@@ -882,7 +900,6 @@ void bt_thread() {
         // TODO uncomment this
         printk("%s\r\n", jsonDataBuf);
         memset(jsonDataBuf, 0, JSON_BUFFER_SIZE);
-
         //printk("right estimate\r\n");
         rightVal = estimate(rightVal, &rightKalman);
 
@@ -912,18 +929,18 @@ void bt_thread() {
         } else {
             tempPos = 3 - (rightVal > 1);
         }
-        printk("Ultrasonic Pos:    %d\r\n", tempPos);
+        //printk("Ultrasonic Pos:    %d\r\n", tempPos);
 
-        uint8_t avPos = (uint8_t)roundf((tempPos + rssiPos) / 2);
-        printk("Average Pos: %d\r\n", avPos);
+        uint8_t fuckingPos = (uint8_t)roundf((tempPos + rssiPos) / 2);
+        //printk("Average Pos: %d\r\n", fuckingPos);
  
-        k_msgq_put(&playerPos, &avPos, K_NO_WAIT);
+        k_msgq_put(&playerPos, &fuckingPos, K_NO_WAIT);
 
         k_msgq_peek(&lifeQ, &lives);
         k_msgq_peek(&scoreQ, &score);
         k_msgq_peek(&comboQ, &combo);
         update_ad(lives, combo, score, 0);
-        k_msleep(250);
+        k_msleep(100);
     }
     return;
 }
@@ -1002,9 +1019,39 @@ void speaker_thread(void) {
         return;
     }
 
+    //while (1) {
+        play_melody(imperial_march, ARRAY_SIZE(imperial_march), 500);
+        k_msleep(10);
+    //}
+    return;
+}
+
+void tx_thread() {
+    uint8_t state = 0;
+    uint8_t lives = 0;
+    uint8_t score = 0;
+    uint8_t combo = 0;
+
+    int err;
+
+    /* Initialize the Bluetooth Subsystem */
+    bt_id_create(&address, NULL);
+    err = bt_enable(bt_ready);
+
+	if (err) {
+		printk("Bluetooth init failed (err %d)\n", err);	
+		return;
+	}
+
+	printk("Bluetooth initialized\n");
+
+	start_scan();
+
     while (1) {
-        play_melody(imperial_march, ARRAY_SIZE(imperial_march), 1000);
+        k_msgq_peek(&lifeQ, &lives);
+        k_msgq_peek(&scoreQ, &score);
+        k_msgq_peek(&comboQ, &combo);
+        update_ad(lives, combo, score, 0);
         k_msleep(10);
     }
-    return;
 }
