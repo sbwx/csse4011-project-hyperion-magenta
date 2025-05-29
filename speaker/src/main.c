@@ -98,16 +98,9 @@ int main(void) {
 
     printk("Playing melody...\n");
 
-    //while (1) {
-    play_melody(imperial_march, ARRAY_SIZE(imperial_march), 200);
-    //}
+    play_melody(imperial_march, ARRAY_SIZE(imperial_march), 1000);
 
     struct tone test = {NOTE_F4, 350};
-
-/*     while (1) {
-        play_tone(test, 200);
-        k_usleep(23250);
-    } */
 
     return 0;
 }
