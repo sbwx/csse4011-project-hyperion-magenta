@@ -24,11 +24,11 @@
 #define UNCALIBRATED_RSSIS	{-45.f, -58.f, -55.f, -53.f, -47.f, -59.f, -62.f, -47.f, -63.f, -60.f, -67.f, -69.f, -59.f}
 
 #define CALIBRATED_RSSIS	{-59.f, -68.f, -55.f, -68.f, -62.f, -56.f, -65.f, -57.f, -63.f, -60.f, -67.f, -69.f, -59.f}
-#define BASE_COORDS {	{0.0f, 0.0f}, {1.5f, 0.0f}, {3.0f, 0.0f}, {3.0f, 2.0f}, {3.0f, 4.0f}, {1.5f, 4.0f}, {0.0f, 4.0f}, {0.0f, 2.0f}, {4.5f, 0.0f}, {6.0f, 0.0f}, {6.0f, 2.0f}, {6.0f, 4.0f}, {4.5f, 4.0f}	}
+#define BASE_COORDS {	{0.0f, 0.0f}, {1.5f, 0.0f}, {3.0f, 0.0f}, {3.0f, 2.0f}, {3.0f, 4.0f}, {1.5f, 4.0f}, {0.0f, 4.0f}, {0.0f, 2.0f}	}
 #define ENVIRONMENTAL_CONSTANT 3.f
 
 #define DIM 2
-#define DIST_MAX_ENTRIES	20
+#define DIST_MAX_ENTRIES	8
 
 /* Audio settings */
 #define SAMPLE_RATE         44100
@@ -41,6 +41,18 @@
 K_MEM_SLAB_DEFINE_STATIC(mem_slab, BLOCK_SIZE, 4, 4);
 
 static const struct device *i2s_dev;
+
+typedef struct KalmanFilter {
+    float measuredErr;
+    float estimatedErr;
+    float noise;
+    float currEstimate;
+    float lastEstimate;
+    float kalmanGain;
+}KalmanFilter;
+
+int8_t stupidArr[8] = {0};
+float nodes[8][2] = BASE_COORDS;
 
 #define STRIP_NODE		DT_ALIAS(led_strip)
 
@@ -313,17 +325,17 @@ static bool parse_us_cb(struct bt_data *data, void *user_data) {
 
 // ad parsing function for ultrasonic adv
 static bool parse_mobile_cb(struct bt_data *data, void *user_data) {
-    int8_t* rssiArr;
-    k_msgq_peek(&rssiQ, &rssiArr);
+/*     int8_t* rssiArr;
+    k_msgq_peek(&rssiQ, &rssiArr); */
 	// temp variable to store individual 4 bytes from ultrasonic node transmission
 
 	if (data->type == BT_DATA_MANUFACTURER_DATA && data->data_len >= 25) {
 		const uint8_t *d = data->data;
 		if ((d[20] < 8)) {
-		    rssiArr[d[20]] = (int8_t)d[21];
+		    stupidArr[d[20]] = (int8_t)d[21];
         } 
         if (d[22] < 8) {
-		    rssiArr[d[22]] = (int8_t)d[23];
+		    stupidArr[d[22]] = (int8_t)d[23];
         }
 	}
 	return true;
@@ -369,7 +381,7 @@ static void start_scan(void) {
 	return (powf(10.f, (calibratedRssi[nodeIndex] - rssi) / (10.f * ENVIRONMENTAL_CONSTANT)));
  }
 
- void multilateration_new(float** stations, double* r, double x[DIM]) {
+ void multilateration_new(float stations[8][2], double* r, double x[DIM]) {
     int valid_count = 0;
     float* valid_stations[DIST_MAX_ENTRIES];
     double valid_r[DIST_MAX_ENTRIES];
@@ -458,6 +470,21 @@ static void start_scan(void) {
     //printk("Raw solution: x = [%.4f, %.4f]\n", x[0], x[1]);
 }
 
+float estimate(float measurement, KalmanFilter* kalman) {
+    // Update Kalman Gain
+    kalman->kalmanGain = kalman->estimatedErr / (kalman->estimatedErr + kalman->measuredErr);
+    
+    // Get the current estimate
+    kalman->currEstimate = kalman->lastEstimate + kalman->kalmanGain * (measurement - kalman->lastEstimate);
+    
+    // Get the estimated error
+    kalman->estimatedErr = (1.f - kalman->kalmanGain) * kalman->estimatedErr + fabsf(kalman->lastEstimate - kalman->currEstimate) * kalman->noise;
+    // Update the estimates
+    kalman->lastEstimate = kalman->currEstimate;
+
+    return kalman->currEstimate;
+}
+
 void bt_thread() {
 	int err;
 
@@ -476,8 +503,75 @@ void bt_thread() {
     double coords[DIM] = {0.f};
     double distArr[8] = {0};
 
+    uint8_t avIndex = 0;
+    float leftWindow[3] = {0};
+    float rightWindow[3] = {0};
+
+    double multiY = 0;
+    float rssiWindow[3] = {0};
+
+    float distLWindow[3] = {0};
+    float distRWindow[3] = {0};
+
+    float leftDist = 0;
+    float rightDist = 0;
+
+    KalmanFilter rssiKalman = { 
+		.kalmanGain = 0.f,
+		.lastEstimate = 0.f,
+		.currEstimate = 0.f,
+		.measuredErr = 0.5f,
+		.estimatedErr = 1.f,
+		.noise = 0.1f
+	};
+
+    KalmanFilter Kalman = { 
+		.kalmanGain = 0.f,
+		.lastEstimate = 0.f,
+		.currEstimate = 0.f,
+		.measuredErr = 0.5f,
+		.estimatedErr = 1.f,
+		.noise = 0.1f
+	};
+
+    KalmanFilter leftKalman = { 
+		.kalmanGain = 0.f,
+		.lastEstimate = 0.f,
+		.currEstimate = 0.f,
+		.measuredErr = 0.012f,
+		.estimatedErr = 1.f,
+		.noise = 0.1f
+	};
+
+    KalmanFilter rightKalman = { 
+		.kalmanGain = 0.f,
+		.lastEstimate = 0.f,
+		.currEstimate = 0.f,
+		.measuredErr = 0.012f,
+		.estimatedErr = 1.f,
+		.noise = 0.1f
+	};
+
+    KalmanFilter distLKalman = { 
+		.kalmanGain = 0.f,
+		.lastEstimate = 0.f,
+		.currEstimate = 0.f,
+		.measuredErr = 0.012f,
+		.estimatedErr = 1.f,
+		.noise = 0.1f
+	};
+
+    KalmanFilter distRKalman = { 
+		.kalmanGain = 0.f,
+		.lastEstimate = 0.f,
+		.currEstimate = 0.f,
+		.measuredErr = 0.012f,
+		.estimatedErr = 1.f,
+		.noise = 0.1f
+	};
+
     // teehee
-	int8_t* rssiArr = (int8_t*)k_calloc(DIST_MAX_ENTRIES, sizeof(int8_t));
+/* 	int8_t* rssiArr = (int8_t*)k_calloc(DIST_MAX_ENTRIES, sizeof(int8_t));
     k_msgq_put(&rssiQ, &rssiArr, K_NO_WAIT);
     
     float** cunt = (float**)k_calloc(20, sizeof(float*));
@@ -490,41 +584,113 @@ void bt_thread() {
         for (uint8_t j = 0; j < 2; j++) {
             cunt[i][j] = fuck[i][j];
         }
-    }
+    } */
 
     while (1) {
-        k_msgq_get(&leftQ, &leftVal, K_NO_WAIT);
-        k_msgq_get(&rightQ, &rightVal, K_NO_WAIT);
         for (int i = 0; i < 8; i++) {
-            distArr[i] = rssi_to_dist(i, rssiArr[i]);
+            distArr[i] = rssi_to_dist(i, stupidArr[i]);
             printk("Dist %d:    %f\r\n", i, distArr[i]);
         }
 
-        // Pick the closest distance value (left node if 1)
-        if (pick_closest(distArr[1], distArr[5] + 0.2)) {
+        distLWindow[avIndex] = distArr[1];
+        distRWindow[avIndex] = distArr[5];
+
+        leftDist = 0;
+        rightDist = 0;
+
+        for (int i = 0; i < 3; i++) {
+            leftDist += distLWindow[i];
+            rightDist += distRWindow[i];
+        }
+
+        leftDist /= 3;
+        rightDist /= 3;
+
+        leftDist = estimate(leftDist, &distLKalman);
+        rightDist = estimate(rightDist, &distRKalman);
+        uint8_t rssiPos;
+
+        printk("Left Dist:  %f\r\n", leftDist);
+        printk("Right Dist:  %f\r\n", rightDist);
+
+        if (pick_closest(leftDist, rightDist)) {
+            rssiPos = (leftDist > 0.45);
+        } else {
+            rssiPos = 3 - (rightDist > 0.45);
+        }
+        printk("RSSI Pos:   %d\r\n", rssiPos);
+
+         // Pick the closest distance value (left node if 1)
+/*         if (pick_closest(distArr[1], distArr[5] + 0.2)) {
             printk("Left node closer RSSI\r\n");
         } else {
             printk("Right node closer RSSI\r\n");
+        } */
+
+         multilateration_new(nodes, distArr, coords);
+        multiY = coords[1];
+        if (multiY > 4) {
+			multiY = 4;
+		} else if (multiY < 0) {
+			multiY = 0;
+		}
+
+        rssiWindow[avIndex] = multiY;
+        multiY = 0;
+
+        for (int i = 0; i < 3; i++) {
+            multiY += rssiWindow[i];
+        }
+        multiY /=3;
+
+        //printk("Windowed:   %f\r\n", multiY);
+
+        multiY = estimate(multiY, &rssiKalman);
+
+        //printk("Kalmanned:  %f\r\n", multiY);
+
+        uint8_t multiPos = 0;
+
+        // Round that bitch
+        multiPos = (uint8_t)roundf(multiY);
+
+        //printk("BLE y Coord:  %f\r\n", coords[1]);
+
+        k_msgq_get(&leftQ, &leftVal, K_NO_WAIT);
+        k_msgq_get(&rightQ, &rightVal, K_NO_WAIT);
+
+        leftWindow[avIndex] = leftVal;
+        rightWindow[avIndex] = rightVal;
+
+        avIndex = (avIndex + 1) % 3;
+
+        leftVal = 0;
+        rightVal = 0;
+
+        for (int i = 0; i < 3; i++) {
+            leftVal += leftWindow[i];
+            rightVal += rightWindow[i];
         }
 
-        multilateration_new(cunt, distArr, coords);
-        if (coords[1] > 4) {
-			coords[1] = 4;
-		} else if (coords[1] < 0) {
-			coords[1] = 0;
-		}
-        printk("BLE y Coord:  %f\r\n", coords[1]);
+        leftVal /= 3;
+        rightVal /= 3;
 
+        //printk("left estimate\r\n");
+        leftVal = estimate(leftVal, &leftKalman);
+        //printk("right estimate\r\n");
+        rightVal = estimate(rightVal, &rightKalman);
 
-        printk("Left value: %f\r\n", leftVal);
-        printk("Right value: %f\r\n", rightVal);
-        printk("%s\r\n", ((pick_closest(leftVal, rightVal)) ? "left closer" : "right closer"));
         if (pick_closest(leftVal, rightVal)) {
             tempPos = (leftVal > 1);
         } else {
             tempPos = 3 - (rightVal > 1);
         }
-        k_msgq_put(&playerPos, &tempPos, K_NO_WAIT);
+        printk("Ultrasonic Pos:    %d\r\n", tempPos);
+
+        uint8_t fuckingPos = (uint8_t)roundf((tempPos + rssiPos) / 2);
+        printk("Average Pos: %d\r\n", fuckingPos);
+ 
+        k_msgq_put(&playerPos, &fuckingPos, K_NO_WAIT);
         k_msleep(250);
     }
     return;
