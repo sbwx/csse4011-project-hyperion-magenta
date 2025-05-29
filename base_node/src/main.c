@@ -21,6 +21,69 @@
 
 #include "tones.h"
 #include "imperial_march.h"
+
+#ifndef IBEACON_RSSI
+#define IBEACON_RSSI 0xC8
+#endif
+
+uint8_t ibeacon_payload[25] = {
+	0x00, 0x4C, /* Apple */
+	0x02, 0x15, /* iBeacon */
+	0x55, 0x55, 0x55, 0x55, /* UUID[15..12] */
+	0x55, 0x55, /* UUID[11..10] */
+	0x55, 0x55, /* UUID[9..8] */
+	0x55, 0x55, /* UUID[7..6] */
+	0x55, 0x55, 0x55, 0x55, 0x55, 0x55, /* UUID[5..0] */
+	0x00, 0x00, /* Major */
+	0x00, 0x00, /* Minor */
+	IBEACON_RSSI /* Calibrated RSSI @ 1m */
+ };
+
+ bt_addr_le_t address;
+
+  /*
+  * Set iBeacon demo advertisement data. These values are for
+  * demonstration only and must be changed for production environments!
+  *
+  * UUID:  18ee1516-016b-4bec-ad96-bcb96d166e97
+  * Major: 0
+  * Minor: 0
+  * RSSI:  -56 dBm
+  */
+  static struct bt_data ad[] = {
+    BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_NO_BREDR),
+    BT_DATA(BT_DATA_MANUFACTURER_DATA, ibeacon_payload, sizeof(ibeacon_payload))
+};
+
+static void bt_ready(int err) {
+    if (err) {
+        printk("Bluetooth init failed (err %d)\n", err);
+        return;
+    }
+
+    printk("Bluetooth initialized\n");
+
+    /* Start advertising */
+    err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_SCANNABLE | BT_LE_ADV_OPT_USE_IDENTITY, BT_GAP_ADV_FAST_INT_MIN_2, BT_GAP_ADV_FAST_INT_MAX_2, NULL), ad, ARRAY_SIZE(ad), NULL, 0);
+    if (err) {
+        printk("Advertising failed to start (err %d)\n", err);
+        return;
+    }
+
+    printk("iBeacon started\n");
+}
+
+void update_ad(uint8_t b0, int8_t b1, uint8_t b2, int8_t b3) {
+	//printk("Updating ad data...\r\n");
+    // Update the RSSI value in the array
+    ibeacon_payload[20] = b0;  // Example update
+    ibeacon_payload[21] = b1;  // Example update
+    ibeacon_payload[22] = b2;  // Example update
+    ibeacon_payload[23] = b3;  // Example update
+
+	bt_le_adv_update_data(ad, ARRAY_SIZE(ad), NULL, 0);
+}
+
 #define UNCALIBRATED_RSSIS	{-45.f, -58.f, -55.f, -53.f, -47.f, -59.f, -62.f, -47.f, -63.f, -60.f, -67.f, -69.f, -59.f}
 
 #define CALIBRATED_RSSIS	{-59.f, -68.f, -55.f, -68.f, -62.f, -56.f, -65.f, -57.f, -63.f, -60.f, -67.f, -69.f, -59.f}
@@ -92,18 +155,31 @@ K_MSGQ_DEFINE(rightQ, sizeof(float), 1, 1);
 
 K_MSGQ_DEFINE(rssiQ, sizeof(int8_t*), 1, 1);
 
+K_MSGQ_DEFINE(stateQ, sizeof(uint8_t), 1, 1);
+K_MSGQ_DEFINE(lifeQ, sizeof(uint8_t), 1, 1);
+K_MSGQ_DEFINE(scoreQ, sizeof(uint8_t), 1, 1);
+K_MSGQ_DEFINE(comboQ, sizeof(uint8_t), 1, 1);
+
+K_SEM_DEFINE(gameStart, 0, 1);
+const struct gpio_dt_spec button1 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+static struct gpio_callback button1_cb_data;
+
 #define STACK_SIZE 4096
 #define SCREEN_THREAD_PRIORITY 8
 #define BT_THREAD_PRIORITY 9
 #define SPEAKER_THREAD_PRIORITY 7
+#define TX_THREAD_PRIORITY 6
 
 void screen_thread();
 void bt_thread();
 void speaker_thread();
+void tx_thread();
 
 K_THREAD_DEFINE(screen_tid, STACK_SIZE, screen_thread, NULL, NULL, NULL, SCREEN_THREAD_PRIORITY, 0, 0);
 K_THREAD_DEFINE(bt_tid, STACK_SIZE, bt_thread, NULL, NULL, NULL, BT_THREAD_PRIORITY, 0, 0);
 K_THREAD_DEFINE(speaker_tid, STACK_SIZE, speaker_thread, NULL, NULL, NULL, SPEAKER_THREAD_PRIORITY, 0, 0);
+//K_THREAD_DEFINE(tx_tid, STACK_SIZE, tx_thread, NULL, NULL, NULL, TX_THREAD_PRIORITY, 0, 0);
+
 
  // macro for converting uint32 to float while preserving bit order
  #define UINT32_TO_FLOAT(i, f) {	\
@@ -188,27 +264,76 @@ void set_bottom_pixels(const struct led_rgb* color) {
     set_player_position(pos);
 }
 
+void clear_rgb_matrix()
+{
+    memset(&(pixels[0]), 0x00, sizeof(struct led_rgb) * 255);
+}
+
+void button1_pressed(const struct device *dev, struct gpio_callback *cb) 
+{
+    k_sem_give(&gameStart);
+}
+
 void screen_thread(void) {
 	size_t color = 0;
 	int rc;
+    uint8_t score = 0;
+    uint8_t lives = 0;
+    uint8_t combo = 0;
+
+    gpio_pin_configure_dt(&button1, GPIO_INPUT);
+	gpio_pin_interrupt_configure_dt(&button1, GPIO_INT_EDGE_TO_ACTIVE);
+	gpio_init_callback(&button1_cb_data, button1_pressed, BIT(button1.pin));
+	gpio_add_callback(button1.port, &button1_cb_data);
+
+    // The colour to draw the strip as
+    struct led_rgb* colour = &colors[3];
 
 	if (!device_is_ready(strip)) {
 		return;
 	}
 
     while (1) {
+
+        // If you're dead
+        if (!lives) {
+            k_msgq_purge(&blockQ);
+            clear_rgb_matrix();
+
+            // Attempt to take the sem for game start
+            k_sem_take(&gameStart, K_FOREVER);
+            
+            // Init all values
+            lives = 3;
+            score = 0;
+            combo = 0;
+
+            
+            k_msgq_purge(&lifeQ);
+            k_msgq_put(&lifeQ, &lives, K_NO_WAIT);
+           
+            k_msgq_purge(&comboQ);
+            k_msgq_put(&comboQ, &combo, K_NO_WAIT);
+           
+            k_msgq_purge(&scoreQ);
+            k_msgq_put(&scoreQ, &score, K_NO_WAIT);
+        }
+
         Block* latestBlock;
         uint8_t numBlocks = k_msgq_num_used_get(&blockQ);
         
         if (!k_msgq_peek_at(&blockQ, &latestBlock, numBlocks - 1) && numBlocks != 0) {
         
+            // Check the block is hitting the line
             if (latestBlock->y < 27) {
                 
+                // Render a new block at the top of the screen
                 Block* block = (Block*)k_malloc(sizeof(Block));
                 block->x = sys_rand8_get() % 4;
                 block->y = 30;
 
                 k_msgq_put(&blockQ, &block, K_NO_WAIT);
+            
             }
         } else if (numBlocks == 0) {
         
@@ -228,8 +353,41 @@ void screen_thread(void) {
                 
             if (currBlock->y < 4) {
                 k_msgq_get(&blockQ, &currBlock, K_NO_WAIT);
+
+                // Get the player position
+                uint8_t pos = 0;
+                k_msgq_peek(&playerPos, &pos);
+
+                // We're in the right spot to hit the block
+                if (pos == currBlock->x) {
+                    // Set the strip colour to green
+                    colour = &colors[1];
+                    score++;
+                    combo++;
+                    k_msgq_purge(&scoreQ);
+                    k_msgq_put(&scoreQ, &score, K_NO_WAIT);
+                    
+                    k_msgq_purge(&comboQ);
+                    k_msgq_put(&comboQ, &combo, K_NO_WAIT);
+                } else {
+                    // Set the strip colour to red
+                    colour = &colors[0];
+                    combo = 0;
+                    lives--;
+
+                    k_msgq_purge(&lifeQ);
+                    k_msgq_put(&lifeQ, &lives, K_NO_WAIT);
+
+                    k_msgq_purge(&comboQ);
+                    k_msgq_put(&comboQ, &combo, K_NO_WAIT);
+                }
+
                 k_free(currBlock);
+                break;
                 
+            } else {
+                // Set the strip colour to magenta
+                colour = &colors[3];
             }
         }
 
@@ -242,7 +400,7 @@ void screen_thread(void) {
                 set_note(currBlock->x, currBlock->y);
                 clear_block_top(currBlock->x, currBlock->y); 
                 
-                set_bottom_pixels(&colors[3]);
+                set_bottom_pixels(colour);
                 
                 led_strip_update_rgb(strip, pixels, STRIP_NUM_PIXELS);
             }
@@ -256,7 +414,7 @@ void screen_thread(void) {
                 (currBlock->y) -= 1;
             }
         }
-        k_msleep(50);
+        k_msleep(400);
     }
 	return;
 }
@@ -486,17 +644,6 @@ float estimate(float measurement, KalmanFilter* kalman) {
 }
 
 void bt_thread() {
-	int err;
-
-	err = bt_enable(NULL);
-	if (err) {
-		printk("Bluetooth init failed (err %d)\n", err);	
-		return;
-	}
-
-	printk("Bluetooth initialized\n");
-
-	start_scan();
     float leftVal = 0;
     float rightVal = 0;
     uint8_t tempPos = 0;
@@ -515,6 +662,10 @@ void bt_thread() {
 
     float leftDist = 0;
     float rightDist = 0;
+
+    uint8_t lives = 0;
+    uint8_t score = 0;
+    uint8_t combo = 0;
 
     KalmanFilter rssiKalman = { 
 		.kalmanGain = 0.f,
@@ -569,6 +720,19 @@ void bt_thread() {
 		.estimatedErr = 1.f,
 		.noise = 0.1f
 	};
+
+        /* Initialize the Bluetooth Subsystem */
+        bt_id_create(&address, NULL);
+        int err = bt_enable(bt_ready);
+    
+        if (err) {
+            printk("Bluetooth init failed (err %d)\n", err);	
+            return;
+        }
+    
+        printk("Bluetooth initialized\n");
+    
+        start_scan();
 
     // teehee
 /* 	int8_t* rssiArr = (int8_t*)k_calloc(DIST_MAX_ENTRIES, sizeof(int8_t));
@@ -691,6 +855,11 @@ void bt_thread() {
         printk("Average Pos: %d\r\n", fuckingPos);
  
         k_msgq_put(&playerPos, &fuckingPos, K_NO_WAIT);
+
+        k_msgq_peek(&lifeQ, &lives);
+        k_msgq_peek(&scoreQ, &score);
+        k_msgq_peek(&comboQ, &combo);
+        update_ad(lives, combo, score, 0);
         k_msleep(250);
     }
     return;
@@ -775,4 +944,34 @@ void speaker_thread(void) {
         k_msleep(10);
     //}
     return;
+}
+
+void tx_thread() {
+    uint8_t state = 0;
+    uint8_t lives = 0;
+    uint8_t score = 0;
+    uint8_t combo = 0;
+
+    int err;
+
+    /* Initialize the Bluetooth Subsystem */
+    bt_id_create(&address, NULL);
+    err = bt_enable(bt_ready);
+
+	if (err) {
+		printk("Bluetooth init failed (err %d)\n", err);	
+		return;
+	}
+
+	printk("Bluetooth initialized\n");
+
+	start_scan();
+
+    while (1) {
+        k_msgq_peek(&lifeQ, &lives);
+        k_msgq_peek(&scoreQ, &score);
+        k_msgq_peek(&comboQ, &combo);
+        update_ad(lives, combo, score, 0);
+        k_msleep(10);
+    }
 }
