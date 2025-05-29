@@ -18,9 +18,28 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/drivers/i2s.h>
+#include <zephyr/data/json.h>
 
 #include "tones.h"
 #include "imperial_march.h"
+
+#define JSON_BUFFER_SIZE 100
+
+// Sensor object for use with JSON descriptor
+struct tagioObj {
+    char* variable;
+	char* value;
+    char* unit;
+};
+
+// JSON object descriptor for generating JSON messages
+static const struct json_obj_descr tagioObjDescriptor[] = {
+    JSON_OBJ_DESCR_PRIM(struct tagioObj, variable, JSON_TOK_STRING),
+    JSON_OBJ_DESCR_PRIM(struct tagioObj, value, JSON_TOK_STRING),
+    JSON_OBJ_DESCR_PRIM(struct tagioObj, unit,  JSON_TOK_STRING)
+};
+
+char jsonDataBuf[JSON_BUFFER_SIZE] = {0};
 
 #ifndef IBEACON_RSSI
 #define IBEACON_RSSI 0xC8
@@ -178,8 +197,6 @@ void tx_thread();
 K_THREAD_DEFINE(screen_tid, STACK_SIZE, screen_thread, NULL, NULL, NULL, SCREEN_THREAD_PRIORITY, 0, 0);
 K_THREAD_DEFINE(bt_tid, STACK_SIZE, bt_thread, NULL, NULL, NULL, BT_THREAD_PRIORITY, 0, 0);
 K_THREAD_DEFINE(speaker_tid, STACK_SIZE, speaker_thread, NULL, NULL, NULL, SPEAKER_THREAD_PRIORITY, 0, 0);
-//K_THREAD_DEFINE(tx_tid, STACK_SIZE, tx_thread, NULL, NULL, NULL, TX_THREAD_PRIORITY, 0, 0);
-
 
  // macro for converting uint32 to float while preserving bit order
  #define UINT32_TO_FLOAT(i, f) {	\
@@ -667,6 +684,8 @@ void bt_thread() {
     uint8_t score = 0;
     uint8_t combo = 0;
 
+	struct tagioObj fuck;
+
     KalmanFilter rssiKalman = { 
 		.kalmanGain = 0.f,
 		.lastEstimate = 0.f,
@@ -734,22 +753,6 @@ void bt_thread() {
     
         start_scan();
 
-    // teehee
-/* 	int8_t* rssiArr = (int8_t*)k_calloc(DIST_MAX_ENTRIES, sizeof(int8_t));
-    k_msgq_put(&rssiQ, &rssiArr, K_NO_WAIT);
-    
-    float** cunt = (float**)k_calloc(20, sizeof(float*));
-    float fuck[13][2] = BASE_COORDS;
-
-    for (uint8_t i = 0; i < 20; i++)
-        cunt[i] = (float*)k_calloc(2, sizeof(float));
-
-    for (uint8_t i = 0; i < 13; i++) {
-        for (uint8_t j = 0; j < 2; j++) {
-            cunt[i][j] = fuck[i][j];
-        }
-    } */
-
     while (1) {
         for (int i = 0; i < 8; i++) {
             distArr[i] = rssi_to_dist(i, stupidArr[i]);
@@ -811,6 +814,27 @@ void bt_thread() {
 
         multiY = estimate(multiY, &rssiKalman);
 
+            fuck.variable = (char*)k_malloc(sizeof(char) * 10);
+			fuck.value = (char*)k_malloc(sizeof(char) * 15);
+			fuck.unit = (char*)k_malloc(sizeof(char) * 4);
+
+			// print int  to string
+			//printk("Cumulative Distance:	%.3f\r\n", cumDist);
+            sprintf(fuck.value, "%.3f", multiY);
+
+			// Create the variable string for the JSON
+            snprintf(fuck.variable, 10, "rssiY");
+            
+            // Set the units
+            strcpy(fuck.unit, "m");
+            
+            // Encode the JSON
+            json_obj_encode_buf(tagioObjDescriptor, 3, &fuck, jsonDataBuf, JSON_BUFFER_SIZE);
+            
+			// TODO uncomment this
+            printk("%s\r\n", jsonDataBuf);
+            memset(jsonDataBuf, 0, JSON_BUFFER_SIZE);
+
         //printk("Kalmanned:  %f\r\n", multiY);
 
         uint8_t multiPos = 0;
@@ -841,8 +865,47 @@ void bt_thread() {
 
         //printk("left estimate\r\n");
         leftVal = estimate(leftVal, &leftKalman);
+
+        // print int  to string
+        //printk("Cumulative Distance:	%.3f\r\n", cumDist);
+        sprintf(fuck.value, "%.3f", leftVal);
+
+        // Create the variable string for the JSON
+        snprintf(fuck.variable, 10, "us-left");
+        
+        // Set the units
+        strcpy(fuck.unit, "m");
+        
+        // Encode the JSON
+        json_obj_encode_buf(tagioObjDescriptor, 3, &fuck, jsonDataBuf, JSON_BUFFER_SIZE);
+        
+        // TODO uncomment this
+        printk("%s\r\n", jsonDataBuf);
+        memset(jsonDataBuf, 0, JSON_BUFFER_SIZE);
+
         //printk("right estimate\r\n");
         rightVal = estimate(rightVal, &rightKalman);
+
+        // print int  to string
+        //printk("Cumulative Distance:	%.3f\r\n", cumDist);
+        sprintf(fuck.value, "%.3f", rightVal);
+
+        // Create the variable string for the JSON
+        snprintf(fuck.variable, 10, "us-right");
+        
+        // Set the units
+        strcpy(fuck.unit, "m");
+        
+        // Encode the JSON
+        json_obj_encode_buf(tagioObjDescriptor, 3, &fuck, jsonDataBuf, JSON_BUFFER_SIZE);
+        
+        // TODO uncomment this
+        printk("%s\r\n", jsonDataBuf);
+        memset(jsonDataBuf, 0, JSON_BUFFER_SIZE);
+
+        k_free(fuck.variable);
+        k_free(fuck.unit);
+        k_free(fuck.value);
 
         if (pick_closest(leftVal, rightVal)) {
             tempPos = (leftVal > 1);
@@ -851,10 +914,10 @@ void bt_thread() {
         }
         printk("Ultrasonic Pos:    %d\r\n", tempPos);
 
-        uint8_t fuckingPos = (uint8_t)roundf((tempPos + rssiPos) / 2);
-        printk("Average Pos: %d\r\n", fuckingPos);
+        uint8_t avPos = (uint8_t)roundf((tempPos + rssiPos) / 2);
+        printk("Average Pos: %d\r\n", avPos);
  
-        k_msgq_put(&playerPos, &fuckingPos, K_NO_WAIT);
+        k_msgq_put(&playerPos, &avPos, K_NO_WAIT);
 
         k_msgq_peek(&lifeQ, &lives);
         k_msgq_peek(&scoreQ, &score);
@@ -939,39 +1002,9 @@ void speaker_thread(void) {
         return;
     }
 
-    //while (1) {
-        play_melody(imperial_march, ARRAY_SIZE(imperial_march), 500);
-        k_msleep(10);
-    //}
-    return;
-}
-
-void tx_thread() {
-    uint8_t state = 0;
-    uint8_t lives = 0;
-    uint8_t score = 0;
-    uint8_t combo = 0;
-
-    int err;
-
-    /* Initialize the Bluetooth Subsystem */
-    bt_id_create(&address, NULL);
-    err = bt_enable(bt_ready);
-
-	if (err) {
-		printk("Bluetooth init failed (err %d)\n", err);	
-		return;
-	}
-
-	printk("Bluetooth initialized\n");
-
-	start_scan();
-
     while (1) {
-        k_msgq_peek(&lifeQ, &lives);
-        k_msgq_peek(&scoreQ, &score);
-        k_msgq_peek(&comboQ, &combo);
-        update_ad(lives, combo, score, 0);
+        play_melody(imperial_march, ARRAY_SIZE(imperial_march), 1000);
         k_msleep(10);
     }
+    return;
 }
